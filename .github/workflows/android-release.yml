@@ -1,0 +1,94 @@
+name: Android Beta Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Required: create GitHub releases and push tags
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: EAS Build & GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node.js ───────────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Version tag (computed early so filename is available to release step)
+      # betaV1.0 on first run, betaV1.0.1 / betaV1.0.2 … on subsequent runs
+      - name: Compute release tag
+        id: version
+        run: |
+          RUN_NUM="${{ github.run_number }}"
+          if [ "$RUN_NUM" -eq "1" ]; then
+            echo "tag=betaV1.0" >> $GITHUB_OUTPUT
+          else
+            echo "tag=betaV1.0.$((RUN_NUM - 1))" >> $GITHUB_OUTPUT
+          fi
+
+      # ── EAS Build ─────────────────────────────────────────────────────────
+      # Required secret: EXPO_TOKEN (Settings → Secrets → Actions)
+      # Generate at: https://expo.dev/accounts/[account]/settings/access-tokens
+      - name: Set up EAS
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build APK via EAS (preview profile)
+        run: |
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --json > eas-build-output.json
+          cat eas-build-output.json
+
+      # ── Download artifact from expo.dev and attach to GitHub Release ──────
+      - name: Download APK artifact
+        run: |
+          BUILD_URL=$(jq -r \
+            '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl // empty' \
+            eas-build-output.json)
+          if [ -z "$BUILD_URL" ]; then
+            echo "❌ Build URL not found in EAS output" && exit 1
+          fi
+          echo "✅ Downloading APK from: $BUILD_URL"
+          curl -fL "$BUILD_URL" \
+            -o "sa-fuel-tracker-${{ steps.version.outputs.tag }}.apk"
+
+      # ── GitHub Release ────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "SA Fuel Tracker ${{ steps.version.outputs.tag }}"
+          prerelease: true
+          body: |
+            ## SA Fuel Tracker ${{ steps.version.outputs.tag }}
+
+            Auto-generated beta build (EAS preview profile) from commit `${{ github.sha }}`.
+
+            **Commit:** ${{ github.event.head_commit.message }}
+
+            ### Install
+            Download `sa-fuel-tracker-*.apk` below and sideload on any Android 8+ device.
+
+            > Built with Expo EAS Build. Signing configured via EAS project credentials.
+          files: sa-fuel-tracker-${{ steps.version.outputs.tag }}.apk
